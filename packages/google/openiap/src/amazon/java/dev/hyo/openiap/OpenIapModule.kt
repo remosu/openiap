@@ -387,6 +387,68 @@ internal fun buildAmazonPurchase(
 }
 
 /**
+ * Normalizes an Amazon billing/trial period string to its ISO-8601 form.
+ *
+ * Amazon expresses subscription periods as words ("Monthly", "Annually") and
+ * free trial periods as day counts ("7 Days", "14 Days"). Already-ISO values
+ * pass through unchanged.
+ */
+internal fun amazonBillingPeriodToIso(period: String?): String {
+    val value = period?.trim().orEmpty()
+    if (value.isEmpty() || value.startsWith("P")) return value
+
+    Regex("""(?i)^(\d+)\s*days?$""").matchEntire(value)?.let {
+        return "P${it.groupValues[1]}D"
+    }
+
+    return when (value.lowercase(Locale.ROOT)) {
+        "weekly", "week", "1 week" -> "P1W"
+        "biweekly", "bi-weekly", "bi weekly", "2 week", "2 weeks" -> "P2W"
+        "monthly", "month", "1 month" -> "P1M"
+        "bi-monthly", "bimonthly", "2 month", "2 months" -> "P2M"
+        "quarterly", "quarter", "3 months" -> "P3M"
+        "semiannual", "semiannually", "semi-annual", "semi-annually", "6 months" -> "P6M"
+        "annual", "annually", "yearly", "year", "1 year" -> "P1Y"
+        else -> value
+    }
+}
+
+/**
+ * Builds the standardized free-trial offer for an Amazon subscription, or null
+ * when the product has no free trial. Amazon surfaces the trial via
+ * Product.getFreeTrialPeriod(); dropping it loses trial information that
+ * consumers need for paywall copy and intro-offer detection.
+ */
+internal fun buildAmazonFreeTrialOffer(sku: String, freeTrialPeriod: String?): SubscriptionOffer? {
+    if (freeTrialPeriod.isNullOrBlank()) return null
+    val trialPeriodIso = amazonBillingPeriodToIso(freeTrialPeriod)
+    if (trialPeriodIso.isEmpty()) return null
+
+    val trialPhase = PricingPhaseAndroid(
+        billingCycleCount = 0,
+        billingPeriod = trialPeriodIso,
+        formattedPrice = "0",
+        priceAmountMicros = "0",
+        priceCurrencyCode = "",
+        // One-time phase: mirrors Play Billing's NON_RECURRING recurrence mode.
+        recurrenceMode = 3
+    )
+    return SubscriptionOffer(
+        basePlanIdAndroid = sku,
+        currency = "",
+        displayPrice = "0",
+        id = sku,
+        offerTagsAndroid = emptyList(),
+        offerTokenAndroid = "",
+        paymentMode = PaymentMode.FreeTrial,
+        period = null,
+        price = 0.0,
+        pricingPhasesAndroid = PricingPhasesAndroid(listOf(trialPhase)),
+        type = DiscountOfferType.Introductory
+    )
+}
+
+/**
  * OpenIapModule for Amazon Appstore SDK IAP.
  *
  * Amazon's native IAP API is listener based instead of connection based. The
@@ -1613,27 +1675,16 @@ class OpenIapModule(
             platform = IapPlatform.Android,
             price = priceAmount,
             productStatusAndroid = ProductStatusAndroid.Ok,
-            subscriptionOffers = listOf(standardizedOffer),
+            subscriptionOffers = listOfNotNull(
+                standardizedOffer,
+                buildAmazonFreeTrialOffer(sku, freeTrialPeriod)
+            ),
             title = title.orEmpty(),
             type = ProductType.Subs
         )
     }
 
-    private fun String?.toIsoBillingPeriod(): String {
-        val value = this?.trim().orEmpty()
-        if (value.isEmpty() || value.startsWith("P")) return value
-
-        return when (value.lowercase(Locale.ROOT)) {
-            "weekly", "week", "1 week" -> "P1W"
-            "biweekly", "bi-weekly", "bi weekly", "2 week", "2 weeks" -> "P2W"
-            "monthly", "month", "1 month" -> "P1M"
-            "bi-monthly", "bimonthly", "2 month", "2 months" -> "P2M"
-            "quarterly", "quarter", "3 months" -> "P3M"
-            "semiannual", "semiannually", "semi-annual", "semi-annually", "6 months" -> "P6M"
-            "annual", "annually", "yearly", "year", "1 year" -> "P1Y"
-            else -> value
-        }
-    }
+    private fun String?.toIsoBillingPeriod(): String = amazonBillingPeriodToIso(this)
 
     private fun String?.toPriceAmount(): Double {
         return AmazonPriceParser.toPriceAmount(this)
